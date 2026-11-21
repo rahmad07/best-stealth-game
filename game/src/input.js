@@ -1,53 +1,115 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
-
+// The Quiet Gallery — input. Keyboard (WASD/arrows, Shift to sneak, P pause,
+// R restart, M mute, Space/Enter confirm) and mouse (click to toss a coin,
+// click buttons on the menus). One edge-triggered action queue, so a key
+// press is never read twice.
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
+export const ACTION_RESTART = 4;
+export const ACTION_MUTE = 8;
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+const KEYS = {
+  ArrowUp: 'up',
+  KeyW: 'up',
+  ArrowDown: 'down',
+  KeyS: 'down',
+  ArrowLeft: 'left',
+  KeyA: 'left',
+  ArrowRight: 'right',
+  KeyD: 'right',
+};
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
+export function createInput(canvas) {
+  const held = new Set();
+  const pressed = new Set();
   let actions = 0;
+  let mouse = null;
+  let mouseClicked = false;
 
-  window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
-  });
+  function onKeyDown(event) {
+    if (event.repeat) return;
+    const move = KEYS[event.code];
+    if (move) {
+      held.add(move);
+      event.preventDefault();
+      return;
+    }
+    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+      held.add('sneak');
+      event.preventDefault();
+      return;
+    }
+    if (event.code === 'Space' || event.code === 'Enter') {
+      pressed.add('confirm');
+      actions |= ACTION_CONFIRM;
+      event.preventDefault();
+    } else if (event.code === 'KeyP' || event.code === 'Escape') {
+      pressed.add('pause');
+      actions |= ACTION_PAUSE;
+    } else if (event.code === 'KeyR') {
+      pressed.add('restart');
+      actions |= ACTION_RESTART;
+    } else if (event.code === 'KeyM') {
+      pressed.add('mute');
+      actions |= ACTION_MUTE;
+    }
+  }
+
+  function onKeyUp(event) {
+    const move = KEYS[event.code];
+    if (move) held.delete(move);
+    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') held.delete('sneak');
+  }
+
+  function onMouseMove(event) {
+    const rect = canvas.getBoundingClientRect();
+    mouse = {
+      x: (event.clientX - rect.left) * (canvas.width / rect.width),
+      y: (event.clientY - rect.top) * (canvas.height / rect.height),
+    };
+  }
+
+  function onMouseDown(event) {
+    onMouseMove(event);
+    mouseClicked = true;
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  canvas.addEventListener('mousemove', onMouseMove);
+  canvas.addEventListener('mousedown', onMouseDown);
 
   return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
+    /** Normalised movement direction plus the sneak flag, from held keys. */
     direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
+      const x = (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
+      const y = (held.has('down') ? 1 : 0) - (held.has('up') ? 1 : 0);
+      return { x, y, sneak: held.has('sneak') };
     },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
     takeActions() {
       const taken = actions;
       actions = 0;
+      pressed.clear();
       return taken;
+    },
+    /** The last mouse position in canvas pixels, or null before any move. */
+    mousePosition() {
+      return mouse;
+    },
+    /** True once per click; call it every frame to consume the click. */
+    takeClick() {
+      const clicked = mouseClicked;
+      mouseClicked = false;
+      return clicked;
+    },
+    /** True while the pointer hovers the rectangle (canvas pixels). */
+    hovering(rect) {
+      return (
+        mouse !== null &&
+        mouse.x >= rect.x &&
+        mouse.x <= rect.x + rect.width &&
+        mouse.y >= rect.y &&
+        mouse.y <= rect.y + rect.height
+      );
     },
   };
 }

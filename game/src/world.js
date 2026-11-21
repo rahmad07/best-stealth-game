@@ -1,124 +1,122 @@
-// The game's rules and state, with no drawing and no browser in it: the player's paddle, the
-// pool of falling blocks and coins, spawning, collisions, score, lives and level. step() advances
-// one fixed step and returns what happened as bit flags, so the caller can react without the
-// world knowing about screens or sound. Nothing here allocates after createWorld returns.
-import { BLOCK, COIN, FIELD, LEVEL, LIVES, PLAYER, POOL_SIZE } from './config.js';
+// The Quiet Gallery — the world. One state object holds the player, the
+// guards, the relics and the run's numbers; step() advances it all one fixed
+// tick and reports what happened as events, so the loop (main.js) only has
+// to play sounds and change screens.
+import { GAME } from './config.js';
+import { parseLevel } from './level.js';
+import { createGuards, updateGuard, GUARD_CHASE } from './guards.js';
+import { createPlayer, isCaughtBy, isOnExit, noiseLevel, resetPlayer, throwCoin, updatePlayer } from './player.js';
 
-export const KIND_BLOCK = 0;
-export const KIND_COIN = 1;
-
-export const EVENT_HIT = 1;
-export const EVENT_COIN = 2;
-export const EVENT_OVER = 4;
-
-function overlaps(a, b) {
-  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+export function createWorld() {
+  const level = parseLevel();
+  const world = {
+    player: createPlayer(level.spawn),
+    guards: createGuards(),
+    relics: level.relics,
+    exit: level.exit,
+    coins: [],
+    time: 0,
+    nerves: GAME.nerves,
+    spottedCount: 0,
+    won: false,
+    over: false,
+    muted: false,
+  };
+  world.reset = () => {
+    const fresh = createWorld();
+    Object.assign(world, fresh, { reset: world.reset });
+  };
+  return world;
 }
 
-export function createWorld(random) {
-  const player = { x: 0, y: FIELD.groundY - PLAYER.height, width: PLAYER.width, height: PLAYER.height, invulnerable: 0 };
-  const items = [];
-  for (let index = 0; index < POOL_SIZE; index += 1) {
-    items.push({ active: false, kind: KIND_BLOCK, x: 0, y: 0, width: 0, height: 0, speed: 0 });
-  }
-  const state = { player, items, score: 0, lives: LIVES, level: 1, elapsed: 0, blockTimer: 0, coinTimer: 0 };
+/**
+ * Advance the world one tick. `input` is the movement direction, `click` is
+ * a world-space point to toss a coin at (or null). Returns an array of
+ * events: step, guardStep, spotted, coin, relic, caught, win, over.
+ */
+export function stepWorld(world, dt, input, click) {
+  const events = [];
+  if (world.won || world.over) return events;
+  world.time += dt;
 
-  function reset() {
-    player.x = (FIELD.width - player.width) / 2;
-    player.invulnerable = 0;
-    for (const item of items) item.active = false;
-    state.score = 0;
-    state.lives = LIVES;
-    state.level = 1;
-    state.elapsed = 0;
-    state.blockTimer = BLOCK.interval;
-    state.coinTimer = COIN.interval;
-  }
+  if (updatePlayer(world.player, dt, input) === 'step') events.push({ type: 'step' });
 
-  function freeItem() {
-    for (let index = 0; index < items.length; index += 1) if (!items[index].active) return items[index];
-    return null;
-  }
-
-  function spawnBlock() {
-    const item = freeItem();
-    if (item === null) return;
-    item.active = true;
-    item.kind = KIND_BLOCK;
-    item.width = BLOCK.minWidth + random() * (BLOCK.maxWidth - BLOCK.minWidth);
-    item.height = BLOCK.height;
-    item.x = random() * (FIELD.width - item.width);
-    item.y = -item.height;
-    item.speed = BLOCK.speed + BLOCK.speedPerLevel * (state.level - 1) + random() * BLOCK.speedJitter;
-  }
-
-  function spawnCoin() {
-    const item = freeItem();
-    if (item === null) return;
-    item.active = true;
-    item.kind = KIND_COIN;
-    item.width = COIN.size;
-    item.height = COIN.size;
-    item.x = random() * (FIELD.width - item.width);
-    item.y = -item.height;
-    item.speed = COIN.speed + COIN.speedPerLevel * (state.level - 1);
-  }
-
-  function blockInterval() {
-    return Math.max(BLOCK.minInterval, BLOCK.interval * BLOCK.intervalScale ** (state.level - 1));
-  }
-
-  /**
-   * One fixed step. `direction` is -1, 0 or 1 (left, still, right). With `harmless` set (the title
-   * screen's backdrop) things fall but nothing touches the player and nothing scores.
-   */
-  function step(dt, direction, harmless) {
-    let events = 0;
-    state.elapsed += dt;
-    state.level = Math.min(LEVEL.max, 1 + Math.floor(state.elapsed / LEVEL.seconds));
-
-    player.x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * dt));
-    if (player.invulnerable > 0) player.invulnerable = Math.max(0, player.invulnerable - dt);
-
-    state.blockTimer -= dt;
-    if (state.blockTimer <= 0) {
-      spawnBlock();
-      state.blockTimer += blockInterval();
-    }
-    state.coinTimer -= dt;
-    if (state.coinTimer <= 0) {
-      spawnCoin();
-      state.coinTimer += COIN.interval + random() * COIN.intervalJitter;
-    }
-
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      item.y += item.speed * dt;
-      if (item.y > FIELD.groundY) {
-        item.active = false;
-        if (item.kind === KIND_BLOCK && !harmless) state.score += BLOCK.dodgePoints;
-        continue;
+  if (click) {
+    const coin = throwCoin(world.player, click.x, click.y);
+    if (coin) {
+      world.coins.push(coin);
+      events.push({ type: 'coin' });
+      for (const guard of world.guards) {
+        const distance = Math.hypot(guard.x - coin.x, guard.y - coin.y);
+        if (distance < GAME.coinHearRadius) guard.heard = { x: coin.x, y: coin.y };
       }
-      if (harmless || !overlaps(item, player)) continue;
-      if (item.kind === KIND_COIN) {
-        item.active = false;
-        state.score += COIN.points;
-        events |= EVENT_COIN;
-      } else if (player.invulnerable === 0) {
-        item.active = false;
-        state.lives -= 1;
-        player.invulnerable = PLAYER.invulnerable;
-        events |= EVENT_HIT;
-        if (state.lives === 0) {
-          events |= EVENT_OVER;
-          break;
+    }
+  }
+
+  // Loud footsteps pull nearby patrolling guards toward the noise.
+  const noise = noiseLevel(world.player);
+  if (noise > 0) {
+    for (const guard of world.guards) {
+      if (guard.state === GUARD_CHASE) continue;
+      const distance = Math.hypot(guard.x - world.player.x, guard.y - world.player.y);
+      if (distance < noise) guard.heard = { x: world.player.x, y: world.player.y };
+    }
+  }
+
+  const playerView = {
+    x: world.player.x,
+    y: world.player.y,
+    sneaking: world.player.sneaking,
+  };
+  for (const guard of world.guards) {
+    const guardEvents = [];
+    updateGuard(guard, dt, playerView, guardEvents);
+    for (const event of guardEvents) {
+      if (event.type === 'spotted') {
+        world.spottedCount += 1;
+        events.push({ type: 'spotted', guard });
+      } else if (event.type === 'footstep') {
+        events.push({ type: 'guardStep', guard });
+      }
+    }
+  }
+
+  for (const coin of world.coins) coin.time += dt;
+  world.coins = world.coins.filter((coin) => coin.time < 1.5);
+
+  for (const relic of world.relics) {
+    if (!relic.taken && Math.hypot(relic.x - world.player.x, relic.y - world.player.y) < 28) {
+      relic.taken = true;
+      world.player.relics += 1;
+      events.push({ type: 'relic' });
+    }
+  }
+
+  for (const guard of world.guards) {
+    if (guard.state === GUARD_CHASE && isCaughtBy(world.player, guard)) {
+      world.nerves -= 1;
+      events.push({ type: 'caught', guard });
+      if (world.nerves <= 0) {
+        world.over = true;
+        events.push({ type: 'over' });
+      } else {
+        resetPlayer(world.player);
+        for (const other of world.guards) {
+          other.state = 'patrol';
+          other.suspicion = 0;
+          other.lastSeen = null;
+          other.target = null;
+          other.pauseTime = 1.5;
         }
       }
+      break;
     }
-    return events;
   }
 
-  reset();
-  return { state, reset, step };
+  if (!world.over && isOnExit(world.player)) {
+    world.won = true;
+    events.push({ type: 'win' });
+  }
+
+  return events;
 }

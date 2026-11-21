@@ -1,79 +1,82 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// The Quiet Gallery — screenshot scenes. Each named scene stages a real world
+// state the game itself can reach (positions, facing, suspicion, relics) and
+// lets the renderer paint it: no mock drawing, the frame is the game. The
+// whole level fits on one screen, so every shot shows the level, guards with
+// cones, cover and the exit at once.
+import { tileCenter } from './level.js';
+import { SCREEN_PLAY } from './render.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function placeGuard(world, index, col, row, facingDegrees, suspicion, state) {
+  const guard = world.guards[index];
+  const at = tileCenter(col, row);
+  guard.x = at.x;
+  guard.y = at.y;
+  guard.facing = (facingDegrees * Math.PI) / 180;
+  guard.suspicion = suspicion;
+  guard.state = state;
+  guard.stateTime = 0;
+  guard.lastSeen = null;
+  guard.target = null;
+  guard.pauseTime = 0;
+  return guard;
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+function placePlayer(world, col, row, sneaking) {
+  const at = tileCenter(col, row);
+  world.player.x = at.x;
+  world.player.y = at.y;
+  world.player.sneaking = sneaking;
+  world.player.moving = false;
+  world.player.facing = 0;
 }
 
 /**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
+ * Stage the named scene on a fresh world and return the screen to paint.
+ * Names: cover (sneaking behind a crate, guard closing in), patrol (mid
+ * patrol in the shadow hall), chase (spotted, a guard giving chase) and
+ * exit (at the door with every relic). Any other name stages the cover.
  */
 export function stageShot(name, world) {
   world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+  const scene = name === 'patrol' || name === 'chase' || name === 'exit' ? name : 'cover';
+
+  if (scene === 'cover') {
+    // Crouched behind the crate row, Rook's cone sweeping straight at the player.
+    placePlayer(world, 5, 2, true);
+    const rook = placeGuard(world, 0, 10, 2, 180, 55, 'suspicious');
+    rook.lastSeen = { x: world.player.x, y: world.player.y };
+    placeGuard(world, 1, 14, 7, 0, 0, 'patrol');
+    placeGuard(world, 2, 19, 13, 180, 0, 'patrol');
+    world.time = 42;
+  } else if (scene === 'patrol') {
+    // Deep in the shadow hall, two cones crossing the open floor ahead.
+    placePlayer(world, 13, 3, true);
+    placeGuard(world, 0, 24, 2, 180, 0, 'patrol');
+    const bishop = placeGuard(world, 1, 14, 7, 0, 12, 'patrol');
+    bishop.lastSeen = { x: world.player.x, y: world.player.y };
+    placeGuard(world, 2, 19, 13, 180, 0, 'patrol');
+    world.relics[0].taken = true;
+    world.player.relics = 1;
+    world.time = 96;
+  } else if (scene === 'chase') {
+    // Caught in the open: Bishop is on the run after the player, meter full.
+    placePlayer(world, 16, 8, false);
+    placeGuard(world, 0, 21, 5, 90, 20, 'patrol');
+    const bishop = placeGuard(world, 1, 15, 8, 0, 100, 'chase');
+    bishop.lastSeen = { x: world.player.x, y: world.player.y };
+    placeGuard(world, 2, 25, 10, 270, 0, 'patrol');
+    world.relics[0].taken = true;
+    world.player.relics = 1;
+    world.time = 150;
+  } else {
+    // One step from the door, every relic pocketed, Knight's cone on the exit.
+    placePlayer(world, 28, 14, true);
+    placeGuard(world, 0, 27, 5, 90, 0, 'patrol');
+    placeGuard(world, 1, 19, 10, 90, 0, 'patrol');
+    placeGuard(world, 2, 27, 12, 90, 40, 'suspicious');
+    for (const relic of world.relics) relic.taken = true;
+    world.player.relics = 4;
+    world.time = 210;
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  return { screen: SCREEN_PLAY };
 }
